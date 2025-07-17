@@ -156,7 +156,16 @@ def analyze_out_of_hours_patterns(connections: List[Dict], target_date: str = No
         device_patterns[mac]['ssids'].add(conn['ssid'])
         device_patterns[mac]['all_dates'].add(conn_date)
         
-        if conn_date == target_date:
+        # Check if this connection is part of the target night cycle
+        # Night cycle includes: evening of target_date + morning of target_date+1
+        target_dt = datetime.fromisoformat(target_date)
+        next_day = (target_dt + timedelta(days=1)).strftime('%Y-%m-%d')
+        
+        conn_dt = datetime.fromisoformat(conn['timestamp'].replace('Z', '+00:00'))
+        is_target_evening = (conn_date == target_date and conn_dt.hour >= 18)
+        is_target_morning = (conn_date == next_day and conn_dt.hour < 6)
+        
+        if is_target_evening or is_target_morning:
             device_patterns[mac]['target_date_connections'].append(conn)
         else:
             device_patterns[mac]['baseline_connections'].append(conn)
@@ -510,7 +519,7 @@ def get_client_events(network_id: str, start_time: str, end_time: Optional[str] 
                 filtered_events = []
                 for event in page_events:
                     event_time = event.get('occurredAt', '')
-                    if event_time >= start_time:
+                    if event_time >= start_time and event_time < end_time:
                         filtered_events.append(event)
                 page_events = filtered_events
             
@@ -552,23 +561,37 @@ def get_client_events(network_id: str, start_time: str, end_time: Optional[str] 
         return []
 
 def get_comprehensive_baseline_events(network_id: str, investigation_date: str) -> List[Dict]:
-    """Get comprehensive baseline events by collecting data day by day for 7 days"""
+    """Get comprehensive baseline events by collecting data day by day for 7 days with proper cross-day handling"""
     from datetime import datetime, timedelta
     
     target_dt = datetime.fromisoformat(investigation_date)
     all_baseline_events = []
     
-    print(f"    🔍 Collecting comprehensive 7-day baseline data...")
+    print(f"    🔍 Collecting comprehensive 7-day baseline data with cross-day periods...")
     
     # Collect data for each of the 7 days before target date
+    # For proper out-of-hours analysis, we need complete night cycles
     for i in range(7, 0, -1):  # 7 days ago to 1 day ago
         day_dt = target_dt - timedelta(days=i)
-        day_start = day_dt.strftime("%Y-%m-%dT00:00:00.000Z")
-        day_end = day_dt.strftime("%Y-%m-%dT23:59:59.999Z")
+        next_day_dt = day_dt + timedelta(days=1)
         
-        print(f"      📅 Day {8-i}/7: {day_dt.strftime('%Y-%m-%d')}")
-        day_events = get_client_events(network_id, day_start, day_end)
-        all_baseline_events.extend(day_events)
+        # Collect evening period (18:00-23:59) of the baseline day
+        evening_start = day_dt.strftime("%Y-%m-%dT18:00:00.000Z")
+        evening_end = day_dt.strftime("%Y-%m-%dT23:59:59.999Z")
+        
+        # Collect morning period (00:00-05:59) of the next day
+        morning_start = next_day_dt.strftime("%Y-%m-%dT00:00:00.000Z")
+        morning_end = next_day_dt.strftime("%Y-%m-%dT05:59:59.999Z")
+        
+        print(f"      📅 Day {8-i}/7: {day_dt.strftime('%Y-%m-%d')} evening + {next_day_dt.strftime('%Y-%m-%d')} morning")
+        
+        # Get evening events from baseline day
+        evening_events = get_client_events(network_id, evening_start, evening_end)
+        all_baseline_events.extend(evening_events)
+        
+        # Get morning events from next day
+        morning_events = get_client_events(network_id, morning_start, morning_end)
+        all_baseline_events.extend(morning_events)
     
     print(f"    ✅ Total baseline events collected: {len(all_baseline_events)}")
     return all_baseline_events
@@ -1188,11 +1211,8 @@ def run_csv_analysis(csv_filename: str, params: tuple):
     
     if all_connections:
         print("\n🔍 Analyzing out-of-hours device patterns...")
-        # Extract target date from latest connection
-        target_date = None
-        if all_connections:
-            latest_timestamp = max(conn['timestamp'] for conn in all_connections)
-            target_date = latest_timestamp[:10]
+        # Use the investigation date as the target date
+        target_date = investigation_date
         
         pattern_analysis = analyze_out_of_hours_patterns(all_connections, target_date)
         
@@ -1312,11 +1332,8 @@ def run_analysis(org_id: str, network_id: str, investigation_date: str, investig
     # Analyze patterns
     if all_connections:
         print("\n🔍 Analyzing out-of-hours device patterns...")
-        # Extract target date from latest connection
-        target_date = None
-        if all_connections:
-            latest_timestamp = max(conn['timestamp'] for conn in all_connections)
-            target_date = latest_timestamp[:10]
+        # Use the investigation date as the target date
+        target_date = investigation_date
         
         pattern_analysis = analyze_out_of_hours_patterns(all_connections, target_date)
         
